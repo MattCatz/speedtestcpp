@@ -1,6 +1,7 @@
 #include <cstring>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <iostream>
 #include "speedtest/client.hpp"
 
 speedtest::Client::~Client() {
@@ -22,20 +23,24 @@ bool speedtest::Client::connect() {
 		return false;
 	}
 
-	if ( this -> read(reply)) {
+	int major;
+	int minor;
+	char b[10];
+	char c[30];
 
-		std::stringstream reply_stream(reply);
-		std::string hello;
-
-		reply_stream >> hello >> this -> _version;
-
-		if ( reply_stream.fail()) {
-			this -> close();
-			return false;
-		} else if ( !reply.empty() && hello == "HELLO" )
-			return true;
+	FILE *socketFile = fdopen(this->_fd, "r");
+	if (socketFile == nullptr) {
+		this -> close();
+		return false;
 	}
 
+	if (fscanf(socketFile, "HELLO %d.%d (%[0-9.]) %s", &major, &minor, b, c) == 4) {
+		this -> _version = major * 1000;
+		this -> _version += minor;
+		// fclose(socketFile);
+		return true;
+	}
+	fclose(socketFile);
 	this -> close();
 	return false;
 }
@@ -54,8 +59,8 @@ bool speedtest::Client::ping(long &ms) {
 	if ( !this -> _fd )
 		return false;
 
-	std::stringstream cmd;
-	std::string reply;
+	std::stringstream cmd; 
+	int _time;
 
 	auto start = std::chrono::steady_clock::now();
 	cmd << "PING " << start.time_since_epoch().count();
@@ -63,12 +68,19 @@ bool speedtest::Client::ping(long &ms) {
 	if ( !this -> write(cmd.str()))
         	return false;
 
-	if ( this -> read(reply) && reply.substr(0, 5) == "PONG " ) {
-		auto stop = std::chrono::steady_clock::now();
-		ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
-		return true;
+	FILE *socketFile = fdopen(this->_fd, "r");
+	if (socketFile == nullptr) {
+		this -> close();
+		return false;
 	}
 
+	if (fscanf(socketFile, "PONG %d", &_time) == 1) {
+		auto stop = std::chrono::steady_clock::now();
+		ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
+		// fclose(socketFile);
+		return true;
+	}
+	fclose(socketFile);
 	this -> close();
 	return false;
 }
@@ -152,21 +164,26 @@ bool speedtest::Client::upload(const long size, const long chunk_size, long &ms)
 		}
 	}
 
-	std::string reply;
+	int _size;
+	int _time;
 
-	if ( !this -> read(reply)) {
-		delete[] buff;
+	FILE *socketFile = fdopen(this->_fd, "r");
+	if (socketFile == nullptr) {
+		this -> close();
 		return false;
 	}
 
-	auto stop = std::chrono::steady_clock::now();
-
-	std::stringstream ss;
-	ss << "OK " << size << " ";
-	ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
+	if (fscanf(socketFile, "OK %d %d", &_size, &_time) == 2) {
+		auto stop = std::chrono::steady_clock::now();
+		ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
+		// fclose(socketFile);
+		delete[] buff;
+		return _size == size;
+	}
+	fclose(socketFile);
 	delete[] buff;
 
-	return reply.substr(0, ss.str().length()) == ss.str();
+	return false;
 }
 
 bool speedtest::Client::mk_socket() {
@@ -180,13 +197,19 @@ bool speedtest::Client::mk_socket() {
 	if ( server == nullptr )
 		return false;
 #else
-	struct hostent server;
+	struct hostent server = {0};
 	char tmpbuf[BUFSIZ];
-	struct hostent *result;
-	int errnop;
+	struct hostent *result = 0;
+	int errnop = 0;
 
 	if ( gethostbyname_r(hostp.first.c_str(), &server, (char *)&tmpbuf, BUFSIZ, &result, &errnop))
 		return false;
+	if ((!result) || (errnop)) {
+		return false;
+	}
+	if (server.h_addr[0] == 0) {
+		return false;
+	}
 
 #endif
 
@@ -206,7 +229,7 @@ bool speedtest::Client::mk_socket() {
 	return ::connect(this -> _fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) >= 0;
 }
 
-float speedtest::Client::version() {
+unsigned long speedtest::Client::version() {
     return this -> _version;
 }
 
@@ -217,28 +240,6 @@ const std::pair<std::string, int> speedtest::Client::host() {
 	std::string host = targetHost.substr(0, found);
 	std::string port = targetHost.substr(found + 1, targetHost.length() - found);
 	return std::pair<std::string, int>(host, std::atoi(port.c_str()));
-}
-
-bool speedtest::Client::read(std::string &buffer) {
-
-	buffer.clear();
-
-	if ( !this -> _fd )
-		return false;
-
-	char c;
-	while( true ) {
-
-		auto n = this -> read(&c, 1);
-		if ( n == -1 )
-			return false;
-		if ( c == '\n' || c == '\r' )
-			break;
-
-		buffer += c;
-
-	}
-	return true;
 }
 
 bool speedtest::Client::write(const std::string &buffer) {
